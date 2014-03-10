@@ -1,169 +1,172 @@
-#!/usr/bin/env node
-/*
- * jQuery Release Management
- */
+module.exports = function( Release ) {
 
-var fs = require("fs"),
-	child = require("child_process"),
-	debug = false;
+	var
+		fs = require( "fs" ),
+		shell = require( "shelljs" ),
 
-var scpURL = "jqadmin@code.origin.jquery.com:/var/www/html/code.jquery.com/",
-	cdnURL = "http://code.origin.jquery.com/",
+		// Windows needs the .cmd version but will find the non-.cmd
+		// On Windows, ensure the HOME environment variable is set
+		gruntCmd = process.platform === "win32" ? "grunt.cmd" : "grunt",
 
-	version = /^[\d.]+(?:(?:a|b|rc)\d+|pre)?$/,
-	versionFile = "version.txt",
-	
-	file = "dist/jquery.js",
-	minFile = "dist/jquery.min.js",
-	
-	files = {
-		"jquery-VER.js": file,
-		"jquery-VER.min.js": minFile
-	},
-	
-	finalFiles = {
-		"jquery.js": file,
-		"jquery-latest.js": file,
-		"jquery.min.js": minFile,
-		"jquery-latest.min.js": minFile
-	};
+		devFile = "dist/jquery.js",
+		minFile = "dist/jquery.min.js",
+		mapFile = "dist/jquery.min.map",
 
-exec( "git pull && git status", function( error, stdout, stderr ) {
-	if ( /Changes to be committed/i.test( stdout ) ) {
-		exit( "Please commit changed files before attemping to push a release." );
+		cdnFolder = "dist/cdn",
 
-	} else if ( /Changes not staged for commit/i.test( stdout ) ) {
-		exit( "Please stash files before attempting to push a release." );
+		releaseFiles = {
+			"jquery-VER.js": devFile,
+			"jquery-VER.min.js": minFile,
+			"jquery-VER.min.map": mapFile //,
+// Disable these until 2.0 defeats 1.9 as the ONE TRUE JQUERY
+			// "jquery.js": devFile,
+			// "jquery.min.js": minFile,
+			// "jquery.min.map": mapFile,
+			// "jquery-latest.js": devFile,
+			// "jquery-latest.min.js": minFile,
+			// "jquery-latest.min.map": mapFile
+		},
 
-	} else {
-		setVersion();
-	}
-});
+		googleFilesCDN = [
+			"jquery.js", "jquery.min.js", "jquery.min.map"
+		],
 
-function setVersion() {
-	var oldVersion = fs.readFileSync( versionFile, "utf8" );
-	
-	prompt( "New Version (was " + oldVersion + "): ", function( data ) {
-		if ( data && version.test( data ) ) {
-			fs.writeFileSync( versionFile, data );
-			
-			exec( "git commit -a -m 'Tagging the " + data + " release.' && git push && " +
-				"git tag " + data + " && git push origin " + data, function() {
-					make( data );
-			});
-			
-		} else {
-			console.error( "Malformed version number, please try again." );
-			setVersion();
-		}
-	});
-}
+		msFilesCDN = [
+			"jquery-VER.js", "jquery-VER.min.js", "jquery-VER.min.map"
+		],
 
-function make( newVersion ) {
-	exec( "make clean && make", function( error, stdout, stderr ) {
-		// TODO: Verify JSLint
-		
-		Object.keys( files ).forEach(function( oldName ) {
-			var value = files[ oldName ], name = oldName.replace( /VER/g, newVersion );
+		_complete = Release.complete;
 
-			copy( value, name );
+	/**
+	 * Generates copies for the CDNs
+	 */
+	function makeReleaseCopies() {
+		shell.mkdir( "-p", cdnFolder );
 
-			delete files[ oldName ];
-			files[ name ] = value;
-		});
+		Object.keys( releaseFiles ).forEach(function( key ) {
+			var text,
+				builtFile = releaseFiles[ key ],
+				unpathedFile = key.replace( /VER/g, Release.newVersion ),
+				releaseFile = cdnFolder + "/" + unpathedFile;
 
-		exec( "scp " + Object.keys( files ).join( " " ) + " " + scpURL, function() {
-			setNextVersion( newVersion );
-		});
-	});
-}
+			// Beta releases don't update the jquery-latest etc. copies
+			if ( !Release.preRelease || key.indexOf( "VER" ) >= 0 ) {
 
-function setNextVersion( newVersion ) {
-	var isFinal = false;
-	
-	if ( /(?:a|b|rc)\d+$/.test( newVersion ) ) {
-		newVersion = newVersion.replace( /(?:a|b|rc)\d+$/, "pre" );
-		
-	} else if ( /^\d+\.\d+\.?(\d*)$/.test( newVersion ) ) {
-		newVersion = newVersion.replace( /^(\d+\.\d+\.?)(\d*)$/, function( all, pre, num ) {
-			return pre + (pre.charAt( pre.length - 1 ) !== "." ? "." : "") + (num ? parseFloat( num ) + 1 : 1) + "pre";
-		});
-		
-		isFinal = true;
-	}
-	
-	prompt( "Next Version [" + newVersion + "]: ", function( data ) {
-		if ( !data ) {
-			data = newVersion;
-		}
-		
-		if ( version.test( data ) ) {
-			fs.writeFileSync( versionFile, data );
-			
-			exec( "git commit -a -m 'Updating the source version to " + data + "' && git push", function() {
-				if ( isFinal ) {
-					makeFinal( newVersion );
+				if ( /\.map$/.test( releaseFile ) ) {
+					// Map files need to reference the new uncompressed name;
+					// assume that all files reside in the same directory.
+					// "file":"jquery.min.js","sources":["jquery.js"]
+					text = fs.readFileSync( builtFile, "utf8" )
+						.replace( /"file":"([^"]+)","sources":\["([^"]+)"\]/,
+							"\"file\":\"" + unpathedFile.replace( /\.min\.map/, ".min.js" ) +
+							"\",\"sources\":[\"" + unpathedFile.replace( /\.min\.map/, ".js" ) + "\"]" );
+					fs.writeFileSync( releaseFile, text );
+				} else if ( /\.min\.js$/.test( releaseFile ) ) {
+					// Remove the source map comment; it causes way too many problems.
+					// Keep the map file in case DevTools allow manual association.
+					text = fs.readFileSync( builtFile, "utf8" )
+						.replace( /\/\/# sourceMappingURL=\S+/, "" );
+					fs.writeFileSync( releaseFile, text );
+				} else if ( builtFile !== releaseFile ) {
+					shell.cp( "-f", builtFile, releaseFile );
 				}
+			}
+		});
+	}
+
+	function buildGoogleCDN() {
+		makeArchive( "googlecdn", googleFilesCDN );
+	}
+
+	function buildMicrosoftCDN() {
+		makeArchive( "mscdn", msFilesCDN );
+	}
+
+	function makeArchive( cdn, files ) {
+		if ( Release.preRelease ) {
+			console.log( "Skipping archive creation for " + cdn + "; this is a beta release." );
+			return;
+		}
+
+		console.log( "Creating production archive for " + cdn );
+
+		var archiver = require( "archiver" )( "zip" ),
+			md5file = cdnFolder + "/" + cdn + "-md5.txt",
+			output = fs.createWriteStream( cdnFolder + "/" + cdn + "-jquery-" + Release.newVersion + ".zip" );
+
+		output.on( "error", function( err ) {
+			throw err;
+		});
+
+		archiver.pipe( output );
+
+		files = files.map(function( item ) {
+			return cdnFolder + "/" + item.replace( /VER/g, Release.newVersion );
+		});
+
+		shell.exec( "md5sum", files, function( code, stdout ) {
+			fs.writeFileSync( md5file, stdout );
+			files.push( md5file );
+
+			files.forEach(function( file ) {
+				archiver.append( fs.createReadStream( file ), { name: file } );
 			});
-			
-		} else {
-			console.error( "Malformed version number, please try again." );
-			setNextVersion( newVersion );
+
+			archiver.finalize();
+		});
+	}
+
+	Release.define({
+		npmPublish: true,
+		issueTracker: "trac",
+		contributorReportId: 508,
+		/**
+		 * Generates any release artifacts that should be included in the release.
+		 * The callback must be invoked with an array of files that should be
+		 * committed before creating the tag.
+		 * @param {Function} callback
+		 */
+		generateArtifacts: function( callback ) {
+			if ( Release.exec( gruntCmd ).code !== 0 ) {
+				Release.abort("Grunt command failed");
+			}
+			makeReleaseCopies();
+			callback([ "dist/jquery.js", "dist/jquery.min.js", "dist/jquery.min.map" ]);
+		},
+		/**
+		 * Release completion
+		 */
+		complete: function() {
+			// Build CDN archives async
+			buildGoogleCDN();
+			buildMicrosoftCDN();
+			_complete();
+		},
+		/**
+		 * Our trac milestones are different than the new version
+		 * @example
+		 *
+		 * // For Release.newVersion equal to 2.1.0 or 1.11.0
+		 * Release._tracMilestone();
+		 * // => 1.11/2.1
+		 *
+		 * // For Release.newVersion equal to 2.1.1 or 1.11.1
+		 * Release._tracMilestone();
+		 * // => 1.11.1/2.1.1
+		 */
+		tracMilestone: function() {
+			var otherVersion,
+				m = Release.newVersion.split( "." ),
+				major = m[0] | 0,
+				minor = m[1] | 0,
+				patch = m[2] | 0 ? "." + m[2] : "",
+				version = major + "." + minor + patch;
+			if ( major === 1) {
+				otherVersion = "2." + ( minor - 10 ) + patch;
+				return version + "/" + otherVersion;
+			}
+			otherVersion = "1." + ( minor + 10 ) + patch;
+			return otherVersion + "/" + version;
 		}
 	});
-}
-
-function makeFinal( newVersion ) {
-	var all = Object.keys( finalFiles );
-	
-	// Copy all the files
-	all.forEach(function( name ) {
-		copy( finalFiles[ name ], name );
-	});
-	
-	// Upload files to CDN
-	exec( "scp " + all.join( " " ) + " " + scpURL, function() {
-		exec( "curl '" + cdnURL + "{" + all.join( "," ) + "}?reload'", function() {
-			console.log( "Done." );
-		});
-	});
-}
-
-function copy( oldFile, newFile ) {
-	if ( debug ) {
-		console.log( "Copying " + oldFile + " to " + newFile );
-
-	} else {
-		fs.writeFileSync( newFile, fs.readFileSync( oldFile, "utf8" ) );
-	}
-}
-
-function prompt( msg, callback ) {
-	process.stdout.write( msg );
-	
-	process.stdin.resume();
-	process.stdin.setEncoding( "utf8" );
-	
-	process.stdin.once( "data", function( chunk ) {
-		process.stdin.pause();
-		callback( chunk.replace( /\n*$/g, "" ) );
-	});
-}
-
-function exec( cmd, fn ) {
-	if ( debug ) {
-		console.log( cmd );
-		fn();
-
-	} else {
-		child.exec( cmd, fn );
-	}
-}
-
-function exit( msg ) {
-	if ( msg ) {
-		console.error( "\nError: " + msg );
-	}
-
-	process.exit( 1 );
-}
+};

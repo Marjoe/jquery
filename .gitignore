@@ -1,5 +1,3 @@
-src/selector.js
-dist
 .project
 .settings
 *~
@@ -7,4 +5,9 @@ dist
 *.patch
 /*.html
 .DS_Store
-build/.sizecache.json
+.bower.json
+.sizecache.json
+
+/dist
+/bower_components
+/node_modules
